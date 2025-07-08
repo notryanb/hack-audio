@@ -1,24 +1,70 @@
 use nih_plug::prelude::*;
 use nih_plug_egui::{
     create_egui_editor,
+    egui,
     egui::{Vec2},
     resizable_window::ResizableWindow,
     widgets, EguiState,
 };
 use std::sync::Arc;
 
+#[derive(Clone, Enum, PartialEq)]
+pub enum Fx {
+    #[id = "panning"]
+    Panning,
+}
+impl Fx {
+    pub fn to_f32(fx: Fx) -> f32 {
+        match fx {
+            Fx::Panning => 0.0,
+        }
+    }
+
+    pub fn from_f32(i: f32) -> Self {
+        match i {
+            _ => Fx::Panning,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct UiState {
+}
+
+#[derive(Clone, Enum, PartialEq)]
+pub enum PanningMode {
+    #[id = "linear"]
+    Linear,
+
+    #[id = "square"]
+    Square,
+
+    #[id = "sine"]
+    Sine,
+}
+
+impl PanningMode {
+    pub fn to_f32(gm: PanningMode) -> f32 {
+        match gm {
+            PanningMode::Linear => 0.0,
+            PanningMode::Square => 1.0,
+            PanningMode::Sine => 2.0,
+        }
+    }
+
+    pub fn from_f32(i: f32) -> Self {
+        match i {
+            2.0 => PanningMode::Sine,
+            1.0 => PanningMode::Square,
+            _ => PanningMode::Linear,
+        }
+    }
+}
+
 /// This is mostly identical to the gain example, minus some fluff, and with a GUI.
 pub struct HackAudio {
     params: Arc<PluginParams>,
-
-    // Needed to normalize the peak meter's response based on the sample rate.
-    // peak_meter_decay_weight: f32,
-    //  The current data for the peak meter. This is stored as an [`Arc`] so we can share it between
-    //  the GUI and the audio processing parts. If you have more state to share, then it's a good
-    // idea to put all of that in a struct behind a single `Arc`.
-    
-    //  This is stored as voltage gain.
-    // peak_meter: Arc<AtomicF32>,
+    ui_state: UiState,
 }
 
 
@@ -29,24 +75,28 @@ pub struct PluginParams {
     #[persist = "editor-state"]
     editor_state: Arc<EguiState>,
 
-    #[id = "gain"]
-    pub gain: FloatParam,
+    #[id = "selected_fx"]
+    pub selected_fx: EnumParam<Fx>,
 
     #[id = "pan"]
     pub pan: FloatParam,
 
+    #[id = "panning_mode"]
+    pub panning_mode: EnumParam<PanningMode>,
+
     // TODO: Remove this parameter when we're done implementing the widgets
     #[id = "foobar"]
     pub some_int: IntParam,
+
+    #[id = "gain"]
+    pub gain: FloatParam,
 }
 
 impl Default for HackAudio {
     fn default() -> Self {
         Self {
             params: Arc::new(PluginParams::default()),
-
-            // peak_meter_decay_weight: 1.0,
-            // peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+            ui_state: UiState { }
         }
     }
 }
@@ -56,6 +106,17 @@ impl Default for PluginParams {
     fn default() -> Self {
         Self {
             editor_state: EguiState::from_size(600, 800),
+
+            selected_fx: EnumParam::new("Selected Fx", Fx::Panning),
+            panning_mode: EnumParam::new("Panning Mode", PanningMode::Linear),
+            pan: FloatParam::new(
+              "Pan",
+              0.0,
+              FloatRange::Linear { min: -100.0, max: 100.0 }  
+            )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
 
             // See the main gain example for more details
             gain: FloatParam::new(
@@ -72,13 +133,6 @@ impl Default for PluginParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-            pan: FloatParam::new(
-              "Pan",
-              0.0,
-              FloatRange::Linear { min: -100.0, max: 100.0 }  
-            ).with_unit(" %"),
-
-            
             some_int: IntParam::new("Something", 3, IntRange::Linear { min: 0, max: 3 }),
         }
     }
@@ -116,46 +170,82 @@ impl Plugin for HackAudio {
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let params = self.params.clone();
-        // let peak_meter = self.peak_meter.clone();
         let egui_state = params.editor_state.clone();
         create_egui_editor(
             self.params.editor_state.clone(),
-            (),
+            self.ui_state.clone(),
             |_, _| {},
             move |egui_ctx, setter, _state| {
-                ResizableWindow::new("res-wind")
+                ResizableWindow::new("resizable-window")
                     .min_size(Vec2::new(400.0, 400.0))
-                    .show(egui_ctx, egui_state.as_ref(), |ui| {
-                        // NOTE: See `plugins/diopser/src/editor.rs` for an example using the generic UI widget
+                    .show(egui_ctx, egui_state.as_ref(), |_ui| {
+                        let selected_fx = &params.selected_fx.value();
+                        let panning_mode = &params.panning_mode.value();
+                        
+                        egui::TopBottomPanel::top("menu").show(egui_ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("FX");
 
-                        // This is a fancy widget that can get all the information it needs to properly
-                        // display and modify the parameter from the parametr itself
-                        // It's not yet fully implemented, as the text is missing.
-                        ui.label("Some random integer");
-                        ui.add(widgets::ParamSlider::for_param(&params.some_int, setter));
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::Panning,
+                                        "Panning",
+                                    ))
+                                .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::Panning);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }  
+                           });
+                        });
 
-                        ui.label("Gain");
-                        ui.add(widgets::ParamSlider::for_param(&params.gain, setter));
+                        egui::CentralPanel::default().show(egui_ctx, |ui| {
+                            match selected_fx {
+                                Fx::Panning => {
+                                    ui.horizontal(|ui| {
+                                     if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *panning_mode == PanningMode::Linear,
+                                            "Linear",
+                                        ))
+                                        .clicked()
+                                        {
+                                            setter.begin_set_parameter(&params.panning_mode);
+                                            setter.set_parameter(&params.panning_mode, PanningMode::Linear);
+                                            setter.end_set_parameter(&params.panning_mode);
+                                        }  
 
-                        ui.label("Pan");
-                        ui.add(widgets::ParamSlider::for_param(&params.pan, setter));
+                                     if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *panning_mode == PanningMode::Square,
+                                            "Square",
+                                        ))
+                                        .clicked()
+                                        {
+                                            setter.begin_set_parameter(&params.panning_mode);
+                                            setter.set_parameter(&params.panning_mode, PanningMode::Square);
+                                            setter.end_set_parameter(&params.panning_mode);
+                                        }  
+                                     if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *panning_mode == PanningMode::Sine,
+                                            "Sine",
+                                        ))
+                                        .clicked()
+                                        {
+                                            setter.begin_set_parameter(&params.panning_mode);
+                                            setter.set_parameter(&params.panning_mode, PanningMode::Sine);
+                                            setter.end_set_parameter(&params.panning_mode);
+                                        }  
+                                        
+                                    });
 
-
-                        // // TODO: Add a proper custom widget instead of reusing a progress bar
-                        // let peak_meter =
-                        //     util::gain_to_db(peak_meter.load(std::sync::atomic::Ordering::Relaxed));
-                        // let peak_meter_text = if peak_meter > util::MINUS_INFINITY_DB {
-                        //     format!("{peak_meter:.1} dBFS")
-                        // } else {
-                        //     String::from("-inf dBFS")
-                        // };
-
-                        // let peak_meter_normalized = (peak_meter + 60.0) / 60.0;
-                        // ui.allocate_space(egui::Vec2::splat(2.0));
-                        // ui.add(
-                        //     egui::widgets::ProgressBar::new(peak_meter_normalized)
-                        //         .text(peak_meter_text),
-                        // );
+                                    ui.label("Pan");
+                                    ui.add(widgets::ParamSlider::for_param(&params.pan, setter));
+                                }
+                            }
+                        });
                     });
             },
         )
@@ -182,6 +272,7 @@ impl Plugin for HackAudio {
     ) -> ProcessStatus {
         // Linear panning from Hack Audio book
         let pan_value = self.params.pan.value();
+        let _panning_mode = self.params.panning_mode.value();
         let pan_transform = (pan_value / 200.0) + 0.5;
 
         for channel_samples in buffer.iter_samples() {
