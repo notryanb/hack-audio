@@ -270,9 +270,10 @@ impl Plugin for HackAudio {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+
         // Linear panning from Hack Audio book
         let pan_value = self.params.pan.value();
-        let _panning_mode = self.params.panning_mode.value();
+        let panning_mode = self.params.panning_mode.value();
         let pan_transform = (pan_value / 200.0) + 0.5;
 
         for channel_samples in buffer.iter_samples() {
@@ -282,29 +283,22 @@ impl Plugin for HackAudio {
 
             for (channel, sample) in channel_samples.into_iter().enumerate() {
                 if channel == 0 { // Assumes only left and right channels
-                    *sample *= 1.0 - pan_transform;
+                    let new_sample = match panning_mode {
+                        PanningMode::Linear => 1.0 - pan_transform,
+                        PanningMode::Square => (1.0 - pan_transform).sqrt(),
+                        PanningMode::Sine => ((1.0 - pan_transform) * (std::f32::consts::PI / 2.0)).sin(),
+                    };
+
+                    *sample *= new_sample;
                 } else {
-                    *sample *= pan_transform;
+                    let new_sample = match panning_mode {
+                        PanningMode::Linear => pan_transform,
+                        PanningMode::Square => (pan_transform).sqrt(),
+                        PanningMode::Sine => (pan_transform * (std::f32::consts::PI / 2.0)).sin(),
+                    };
+
+                    *sample *= new_sample;
                 }
-
-                // *sample *= gain;
-                // amplitude += *sample;
-            }
-
-            // To save resources, a plugin can (and probably should!) only perform expensive
-            // calculations that are only displayed on the GUI while the GUI is open
-            if self.params.editor_state.is_open() {
-                // amplitude = (amplitude / num_samples as f32).abs();
-                // let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
-                // let new_peak_meter = if amplitude > current_peak_meter {
-                //     amplitude
-                // } else {
-                //     current_peak_meter * self.peak_meter_decay_weight
-                //         + amplitude * (1.0 - self.peak_meter_decay_weight)
-                // };
-
-                // self.peak_meter
-                //     .store(new_peak_meter, std::sync::atomic::Ordering::Relaxed)
             }
         }
 
