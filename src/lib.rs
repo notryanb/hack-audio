@@ -8,16 +8,27 @@ use std::sync::Arc;
 pub enum Fx {
     #[id = "panning"]
     Panning,
+
+    #[id = "mid-side-encode"]
+    MidSideEncode,
+
+    #[id = "mid-side-decode"]
+    MidSideDecode,
 }
+
 impl Fx {
     pub fn to_f32(fx: Fx) -> f32 {
         match fx {
             Fx::Panning => 0.0,
+            Fx::MidSideEncode => 1.0,
+            Fx::MidSideDecode=> 2.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
+            2.0 => Fx::MidSideDecode,
+            1.0 => Fx::MidSideEncode,
             _ => Fx::Panning,
         }
     }
@@ -77,6 +88,9 @@ pub struct PluginParams {
 
     #[id = "panning_mode"]
     pub panning_mode: EnumParam<PanningMode>,
+
+    #[id = "mid-side-encoding-stereo-width"]
+    pub mid_side_enc_stereo_width: FloatParam,
 }
 
 impl Default for HackAudio {
@@ -104,6 +118,16 @@ impl Default for PluginParams {
                 },
             )
             .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            mid_side_enc_stereo_width: FloatParam::new(
+                "Stereo Width",
+                0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 2.0,
+                },
+            )
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
         }
     }
@@ -168,6 +192,28 @@ impl Plugin for HackAudio {
                                     setter.set_parameter(&params.selected_fx, Fx::Panning);
                                     setter.end_set_parameter(&params.selected_fx);
                                 }
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::MidSideEncode,
+                                        "Mid-Side Encode",
+                                    ))
+                                    .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::MidSideEncode);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::MidSideDecode,
+                                        "Mid-Side Decode",
+                                    ))
+                                    .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::MidSideDecode);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }
                             });
                         });
 
@@ -220,6 +266,14 @@ impl Plugin for HackAudio {
                                 ui.label("Pan");
                                 ui.add(widgets::ParamSlider::for_param(&params.pan, setter));
                             }
+                            Fx::MidSideEncode => { 
+                                ui.label("MidSideEncode"); 
+                                ui.separator();
+                                
+                                ui.label("Stereo Width");
+                                ui.add(widgets::ParamSlider::for_param(&params.mid_side_enc_stereo_width, setter));
+                            }
+                            Fx::MidSideDecode => { ui.label("MidSideDecode"); }
                         });
                     });
             },
@@ -245,6 +299,8 @@ impl Plugin for HackAudio {
 
         match selected_fx {
             Fx::Panning => panning_plugin_process(buffer, &self.params),
+            Fx::MidSideEncode => mid_side_encode_plugin_process(buffer, &self.params),
+            Fx::MidSideDecode => mid_side_decode_plugin_process(buffer, &self.params),
         }
     }
 }
@@ -278,6 +334,37 @@ pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -
                 *sample *= new_sample;
             }
         }
+    }
+
+    ProcessStatus::Normal
+}
+
+pub fn mid_side_encode_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -> ProcessStatus {
+    let num_samples = buffer.samples();
+    let stereo_width = params.mid_side_enc_stereo_width.value();
+    let output = buffer.as_slice();
+
+    for sample_idx in 0..num_samples {
+        let mid = (2.0 - stereo_width) * (output[0][sample_idx] + output[1][sample_idx]) * 0.5;
+        let side = stereo_width * (output[0][sample_idx] - output[1][sample_idx]) * 0.5;
+
+        output[0][sample_idx] = mid;
+        output[1][sample_idx] = side;
+    }
+
+    ProcessStatus::Normal
+}
+
+pub fn mid_side_decode_plugin_process(buffer: &mut Buffer, _params: &Arc<PluginParams>) -> ProcessStatus {
+    let num_samples = buffer.samples();
+    let output = buffer.as_slice();
+
+    for sample_idx in 0..num_samples {
+        let left = output[0][sample_idx] + output[1][sample_idx];
+        let right = output[0][sample_idx] - output[1][sample_idx];
+
+        output[0][sample_idx] = left;
+        output[1][sample_idx] = right;
     }
 
     ProcessStatus::Normal
