@@ -77,13 +77,6 @@ pub struct PluginParams {
 
     #[id = "panning_mode"]
     pub panning_mode: EnumParam<PanningMode>,
-
-    // TODO: Remove this parameter when we're done implementing the widgets
-    #[id = "foobar"]
-    pub some_int: IntParam,
-
-    #[id = "gain"]
-    pub gain: FloatParam,
 }
 
 impl Default for HackAudio {
@@ -112,23 +105,6 @@ impl Default for PluginParams {
             )
             .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
-
-            // See the main gain example for more details
-            gain: FloatParam::new(
-                "Gain",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-30.0),
-                    max: util::db_to_gain(30.0),
-                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
-                },
-            )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-
-            some_int: IntParam::new("Something", 3, IntRange::Linear { min: 0, max: 3 }),
         }
     }
 }
@@ -256,10 +232,6 @@ impl Plugin for HackAudio {
         _buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        // self.peak_meter_decay_weight = 0.25f64
-        //     .powf((buffer_config.sample_rate as f64 * PEAK_METER_DECAY_MS / 1000.0).recip())
-        //     as f32;
-
         true
     }
 
@@ -277,17 +249,13 @@ impl Plugin for HackAudio {
     }
 }
 
+/// Linear panning from Hack Audio Book
 pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -> ProcessStatus {
-    // Linear panning from Hack Audio book
     let pan_value = params.pan.value();
     let panning_mode = params.panning_mode.value();
     let pan_transform = (pan_value / 200.0) + 0.5;
 
     for channel_samples in buffer.iter_samples() {
-        // let mut amplitude = 0.0;
-        // let num_samples = channel_samples.len();
-        // let gain = self.params.gain.smoothed.next();
-
         for (channel, sample) in channel_samples.into_iter().enumerate() {
             if channel == 0 {
                 // Assumes only left and right channels
