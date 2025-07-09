@@ -1,10 +1,6 @@
 use nih_plug::prelude::*;
 use nih_plug_egui::{
-    create_egui_editor,
-    egui,
-    egui::{Vec2},
-    resizable_window::ResizableWindow,
-    widgets, EguiState,
+    EguiState, create_egui_editor, egui, egui::Vec2, resizable_window::ResizableWindow, widgets,
 };
 use std::sync::Arc;
 
@@ -28,8 +24,7 @@ impl Fx {
 }
 
 #[derive(Clone)]
-pub struct UiState {
-}
+pub struct UiState {}
 
 #[derive(Clone, Enum, PartialEq)]
 pub enum PanningMode {
@@ -67,7 +62,6 @@ pub struct HackAudio {
     ui_state: UiState,
 }
 
-
 #[derive(Params)]
 pub struct PluginParams {
     /// The editor state, saved together with the parameter state so the custom scaling can be
@@ -96,11 +90,10 @@ impl Default for HackAudio {
     fn default() -> Self {
         Self {
             params: Arc::new(PluginParams::default()),
-            ui_state: UiState { }
+            ui_state: UiState {},
         }
     }
 }
-
 
 impl Default for PluginParams {
     fn default() -> Self {
@@ -110,13 +103,15 @@ impl Default for PluginParams {
             selected_fx: EnumParam::new("Selected Fx", Fx::Panning),
             panning_mode: EnumParam::new("Panning Mode", PanningMode::Linear),
             pan: FloatParam::new(
-              "Pan",
-              0.0,
-              FloatRange::Linear { min: -100.0, max: 100.0 }  
+                "Pan",
+                0.0,
+                FloatRange::Linear {
+                    min: -100.0,
+                    max: 100.0,
+                },
             )
             .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
-
 
             // See the main gain example for more details
             gain: FloatParam::new(
@@ -181,7 +176,7 @@ impl Plugin for HackAudio {
                     .show(egui_ctx, egui_state.as_ref(), |_ui| {
                         let selected_fx = &params.selected_fx.value();
                         let panning_mode = &params.panning_mode.value();
-                        
+
                         egui::TopBottomPanel::top("menu").show(egui_ctx, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("FX");
@@ -191,59 +186,63 @@ impl Plugin for HackAudio {
                                         *selected_fx == Fx::Panning,
                                         "Panning",
                                     ))
-                                .clicked()
+                                    .clicked()
                                 {
                                     setter.begin_set_parameter(&params.selected_fx);
                                     setter.set_parameter(&params.selected_fx, Fx::Panning);
                                     setter.end_set_parameter(&params.selected_fx);
-                                }  
-                           });
+                                }
+                            });
                         });
 
-                        egui::CentralPanel::default().show(egui_ctx, |ui| {
-                            match selected_fx {
-                                Fx::Panning => {
-                                    ui.horizontal(|ui| {
-                                     if ui
+                        egui::CentralPanel::default().show(egui_ctx, |ui| match selected_fx {
+                            Fx::Panning => {
+                                ui.horizontal(|ui| {
+                                    if ui
                                         .add(egui::widgets::SelectableLabel::new(
                                             *panning_mode == PanningMode::Linear,
                                             "Linear",
                                         ))
                                         .clicked()
-                                        {
-                                            setter.begin_set_parameter(&params.panning_mode);
-                                            setter.set_parameter(&params.panning_mode, PanningMode::Linear);
-                                            setter.end_set_parameter(&params.panning_mode);
-                                        }  
+                                    {
+                                        setter.begin_set_parameter(&params.panning_mode);
+                                        setter.set_parameter(
+                                            &params.panning_mode,
+                                            PanningMode::Linear,
+                                        );
+                                        setter.end_set_parameter(&params.panning_mode);
+                                    }
 
-                                     if ui
+                                    if ui
                                         .add(egui::widgets::SelectableLabel::new(
                                             *panning_mode == PanningMode::Square,
                                             "Square",
                                         ))
                                         .clicked()
-                                        {
-                                            setter.begin_set_parameter(&params.panning_mode);
-                                            setter.set_parameter(&params.panning_mode, PanningMode::Square);
-                                            setter.end_set_parameter(&params.panning_mode);
-                                        }  
-                                     if ui
+                                    {
+                                        setter.begin_set_parameter(&params.panning_mode);
+                                        setter.set_parameter(
+                                            &params.panning_mode,
+                                            PanningMode::Square,
+                                        );
+                                        setter.end_set_parameter(&params.panning_mode);
+                                    }
+                                    if ui
                                         .add(egui::widgets::SelectableLabel::new(
                                             *panning_mode == PanningMode::Sine,
                                             "Sine",
                                         ))
                                         .clicked()
-                                        {
-                                            setter.begin_set_parameter(&params.panning_mode);
-                                            setter.set_parameter(&params.panning_mode, PanningMode::Sine);
-                                            setter.end_set_parameter(&params.panning_mode);
-                                        }  
-                                        
-                                    });
+                                    {
+                                        setter.begin_set_parameter(&params.panning_mode);
+                                        setter
+                                            .set_parameter(&params.panning_mode, PanningMode::Sine);
+                                        setter.end_set_parameter(&params.panning_mode);
+                                    }
+                                });
 
-                                    ui.label("Pan");
-                                    ui.add(widgets::ParamSlider::for_param(&params.pan, setter));
-                                }
+                                ui.label("Pan");
+                                ui.add(widgets::ParamSlider::for_param(&params.pan, setter));
                             }
                         });
                     });
@@ -270,40 +269,50 @@ impl Plugin for HackAudio {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        let selected_fx = self.params.selected_fx.value();
 
-        // Linear panning from Hack Audio book
-        let pan_value = self.params.pan.value();
-        let panning_mode = self.params.panning_mode.value();
-        let pan_transform = (pan_value / 200.0) + 0.5;
+        match selected_fx {
+            Fx::Panning => panning_plugin_process(buffer, &self.params),
+        }
+    }
+}
 
-        for channel_samples in buffer.iter_samples() {
-            // let mut amplitude = 0.0;
-            // let num_samples = channel_samples.len();
-            // let gain = self.params.gain.smoothed.next();
+pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -> ProcessStatus {
+    // Linear panning from Hack Audio book
+    let pan_value = params.pan.value();
+    let panning_mode = params.panning_mode.value();
+    let pan_transform = (pan_value / 200.0) + 0.5;
 
-            for (channel, sample) in channel_samples.into_iter().enumerate() {
-                if channel == 0 { // Assumes only left and right channels
-                    let new_sample = match panning_mode {
-                        PanningMode::Linear => 1.0 - pan_transform,
-                        PanningMode::Square => (1.0 - pan_transform).sqrt(),
-                        PanningMode::Sine => ((1.0 - pan_transform) * (std::f32::consts::PI / 2.0)).sin(),
-                    };
+    for channel_samples in buffer.iter_samples() {
+        // let mut amplitude = 0.0;
+        // let num_samples = channel_samples.len();
+        // let gain = self.params.gain.smoothed.next();
 
-                    *sample *= new_sample;
-                } else {
-                    let new_sample = match panning_mode {
-                        PanningMode::Linear => pan_transform,
-                        PanningMode::Square => (pan_transform).sqrt(),
-                        PanningMode::Sine => (pan_transform * (std::f32::consts::PI / 2.0)).sin(),
-                    };
+        for (channel, sample) in channel_samples.into_iter().enumerate() {
+            if channel == 0 {
+                // Assumes only left and right channels
+                let new_sample = match panning_mode {
+                    PanningMode::Linear => 1.0 - pan_transform,
+                    PanningMode::Square => (1.0 - pan_transform).sqrt(),
+                    PanningMode::Sine => {
+                        ((1.0 - pan_transform) * (std::f32::consts::PI / 2.0)).sin()
+                    }
+                };
 
-                    *sample *= new_sample;
-                }
+                *sample *= new_sample;
+            } else {
+                let new_sample = match panning_mode {
+                    PanningMode::Linear => pan_transform,
+                    PanningMode::Square => (pan_transform).sqrt(),
+                    PanningMode::Sine => (pan_transform * (std::f32::consts::PI / 2.0)).sin(),
+                };
+
+                *sample *= new_sample;
             }
         }
-
-        ProcessStatus::Normal
     }
+
+    ProcessStatus::Normal
 }
 
 impl ClapPlugin for HackAudio {
