@@ -78,15 +78,15 @@ impl PanningMode {
 }
 
 pub struct OutputBuffer {
-    pub left: [f32; 48000],
-    pub right: [f32; 48000],
+    pub left: [f32; 4096],
+    pub right: [f32; 4096],
 }
 
 impl Default for OutputBuffer {
     fn default() -> Self {
         Self {
-            left: [0.0; 48000],
-            right: [0.0; 48000],
+            left: [0.0; 4096],
+            right: [0.0; 4096],
         }
     }
 }
