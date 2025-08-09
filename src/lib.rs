@@ -22,6 +22,9 @@ pub enum Fx {
 
     #[id = "goniometer"]
     Goniometer,
+
+    #[id = "distortion"]
+    Distortion,
 }
 
 impl Fx {
@@ -31,11 +34,13 @@ impl Fx {
             Fx::MidSideEncode => 1.0,
             Fx::MidSideDecode => 2.0,
             Fx::Goniometer => 3.0,
+            Fx::Distortion => 4.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
+            4.0 => Fx::Distortion,
             3.0 => Fx::Goniometer,
             2.0 => Fx::MidSideDecode,
             1.0 => Fx::MidSideEncode,
@@ -117,6 +122,9 @@ pub struct PluginParams {
 
     #[id = "mid-side-encoding-stereo-width"]
     pub mid_side_enc_stereo_width: FloatParam,
+
+    #[id = "distortion_amount"]
+    pub distortion_amount: FloatParam,
 }
 
 impl Default for HackAudio {
@@ -153,6 +161,13 @@ impl Default for PluginParams {
                 "Stereo Width",
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 2.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            distortion_amount: FloatParam::new(
+                "Distortion Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
         }
@@ -252,6 +267,18 @@ impl Plugin for HackAudio {
                                     setter.set_parameter(&params.selected_fx, Fx::Goniometer);
                                     setter.end_set_parameter(&params.selected_fx);
                                 }
+
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::Distortion,
+                                        "Distortion",
+                                    ))
+                                    .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::Distortion);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }
                             });
                         });
 
@@ -316,6 +343,16 @@ impl Plugin for HackAudio {
                             }
                             Fx::MidSideDecode => {
                                 ui.label("MidSideDecode");
+                            }
+                            Fx::Distortion => {
+                                ui.label("Distortion");
+                                ui.separator();
+
+                                ui.label("Distortion Amount");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.distortion_amount,
+                                    setter,
+                                ));
                             }
                             Fx::Goniometer => {
                                 ui.label("Stereo Visualizer (Goniometer)");
@@ -417,7 +454,8 @@ impl Plugin for HackAudio {
             Fx::MidSideDecode => mid_side_decode_plugin_process(buffer, &self.params),
             Fx::Goniometer => {
                 goniometer_plugin_process(buffer, &self.params, &mut self.goniometer_input)
-            }
+            },
+            Fx::Distortion=> distortion_plugin_process(buffer, &self.params),
         }
     }
 }
@@ -474,6 +512,40 @@ pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -
 
                 *sample *= new_sample;
             }
+        }
+    }
+
+    ProcessStatus::Normal
+}
+
+pub fn lerp(start: f32, end: f32, amount: f32) -> f32 {
+    start * (1.0 - amount) + end * amount
+}
+
+pub fn distortion_plugin_process(
+    buffer: &mut Buffer,
+    params: &Arc<PluginParams>,
+) -> ProcessStatus {
+    let num_samples = buffer.samples();
+    let output = buffer.as_slice();
+    let distortion_amount = params.distortion_amount.value();
+
+    // Infinite clipping
+    // TODO 
+    // - When DAW pauses or stops, smooth volume fade out. Otherwise the DAW volume smoothing
+    //   causes the inifite clipping to go on for a few more seconds
+    // - Add other types of distortion
+    for sample_idx in 0..num_samples {
+        if output[0][sample_idx] > 0.0 {
+            output[0][sample_idx] = lerp(output[0][sample_idx], 1.0, distortion_amount);
+        } else if output[0][sample_idx] < 0.0 {
+            output[0][sample_idx] = -lerp(-output[0][sample_idx], 1.0, distortion_amount);
+        }
+
+        if output[1][sample_idx] > 0.0 {
+            output[1][sample_idx] = lerp(output[1][sample_idx], 1.0, distortion_amount);
+        } else if output[1][sample_idx] < 0.0 {
+            output[1][sample_idx] = -lerp(-output[1][sample_idx], 1.0, distortion_amount);
         }
     }
 
