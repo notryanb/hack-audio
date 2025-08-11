@@ -53,6 +53,41 @@ impl Fx {
 pub struct UiState {}
 
 #[derive(Clone, Enum, PartialEq)]
+pub enum DistortionMode {
+    #[id = "cubic"]
+    Cubic,
+
+    #[id = "arctangent"]
+    ArcTangent,
+
+    #[id = "sine"]
+    Sine,
+
+    #[id = "inf-clip"]
+    InfiniteClipping,
+}
+
+impl DistortionMode {
+    pub fn to_f32(gm: DistortionMode) -> f32 {
+        match gm {
+            DistortionMode::Cubic => 0.0,
+            DistortionMode::ArcTangent => 1.0,
+            DistortionMode::Sine => 2.0,
+            DistortionMode::InfiniteClipping => 3.0,
+        }
+    }
+
+    pub fn from_f32(i: f32) -> Self {
+        match i {
+            3.0 => DistortionMode::InfiniteClipping,
+            2.0 => DistortionMode::Sine,
+            1.0 => DistortionMode::ArcTangent,
+            _ => DistortionMode::Cubic,
+        }
+    }
+}
+
+#[derive(Clone, Enum, PartialEq)]
 pub enum PanningMode {
     #[id = "linear"]
     Linear,
@@ -123,6 +158,9 @@ pub struct PluginParams {
     #[id = "mid-side-encoding-stereo-width"]
     pub mid_side_enc_stereo_width: FloatParam,
 
+    #[id = "distortion_mode"]
+    pub distortion_mode: EnumParam<DistortionMode>,
+
     #[id = "distortion_amount"]
     pub distortion_amount: FloatParam,
 }
@@ -146,6 +184,7 @@ impl Default for PluginParams {
 
             selected_fx: EnumParam::new("Selected Fx", Fx::Panning),
             panning_mode: EnumParam::new("Panning Mode", PanningMode::Linear),
+            distortion_mode: EnumParam::new("Distortion Mode", DistortionMode::Cubic),
             pan: FloatParam::new(
                 "Pan",
                 0.0,
@@ -218,6 +257,7 @@ impl Plugin for HackAudio {
                     .show(egui_ctx, egui_state.as_ref(), |_ui| {
                         let selected_fx = &params.selected_fx.value();
                         let panning_mode = &params.panning_mode.value();
+                        let distortion_mode = &params.distortion_mode.value();
 
                         egui::TopBottomPanel::top("menu").show(egui_ctx, |ui| {
                             ui.horizontal(|ui| {
@@ -353,6 +393,64 @@ impl Plugin for HackAudio {
                                     &params.distortion_amount,
                                     setter,
                                 ));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::InfiniteClipping,
+                                            "Infinite Clipping",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::InfiniteClipping,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::Cubic,
+                                            "Cubic",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::Cubic,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::ArcTangent,
+                                            "ArcTangent",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::ArcTangent,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::Sine,
+                                            "Sine",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::Sine,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                });
                             }
                             Fx::Goniometer => {
                                 ui.label("Stereo Visualizer (Goniometer)");
@@ -454,8 +552,8 @@ impl Plugin for HackAudio {
             Fx::MidSideDecode => mid_side_decode_plugin_process(buffer, &self.params),
             Fx::Goniometer => {
                 goniometer_plugin_process(buffer, &self.params, &mut self.goniometer_input)
-            },
-            Fx::Distortion=> distortion_plugin_process(buffer, &self.params),
+            }
+            Fx::Distortion => distortion_plugin_process(buffer, &self.params),
         }
     }
 }
@@ -522,31 +620,48 @@ pub fn lerp(start: f32, end: f32, amount: f32) -> f32 {
     start * (1.0 - amount) + end * amount
 }
 
-pub fn distortion_plugin_process(
-    buffer: &mut Buffer,
-    params: &Arc<PluginParams>,
-) -> ProcessStatus {
+pub fn distortion_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -> ProcessStatus {
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
+    let distortion_mode = params.distortion_mode.value();
     let distortion_amount = params.distortion_amount.value();
 
-    // Infinite clipping
-    // TODO 
-    // - When DAW pauses or stops, smooth volume fade out. Otherwise the DAW volume smoothing
-    //   causes the inifite clipping to go on for a few more seconds
-    // - Add other types of distortion
-    for sample_idx in 0..num_samples {
-        if output[0][sample_idx] > 0.0 {
-            output[0][sample_idx] = lerp(output[0][sample_idx], 1.0, distortion_amount);
-        } else if output[0][sample_idx] < 0.0 {
-            output[0][sample_idx] = -lerp(-output[0][sample_idx], 1.0, distortion_amount);
-        }
+    match distortion_mode {
+        DistortionMode::InfiniteClipping => {
+            for sample_idx in 0..num_samples {
+                if output[0][sample_idx] > 0.0 {
+                    output[0][sample_idx] = lerp(output[0][sample_idx], 1.0, distortion_amount);
+                } else if output[0][sample_idx] < 0.0 {
+                    output[0][sample_idx] = -lerp(-output[0][sample_idx], 1.0, distortion_amount);
+                }
 
-        if output[1][sample_idx] > 0.0 {
-            output[1][sample_idx] = lerp(output[1][sample_idx], 1.0, distortion_amount);
-        } else if output[1][sample_idx] < 0.0 {
-            output[1][sample_idx] = -lerp(-output[1][sample_idx], 1.0, distortion_amount);
+                if output[1][sample_idx] > 0.0 {
+                    output[1][sample_idx] = lerp(output[1][sample_idx], 1.0, distortion_amount);
+                } else if output[1][sample_idx] < 0.0 {
+                    output[1][sample_idx] = -lerp(-output[1][sample_idx], 1.0, distortion_amount);
+                }
+            }
         }
+        DistortionMode::Cubic => {
+            for sample_idx in 0..num_samples {
+                let l = output[0][sample_idx];
+                let r = output[1][sample_idx];
+                output[0][sample_idx] = l - distortion_amount * (1.0 / 3.0) * l * l * l;
+                output[1][sample_idx] = r - distortion_amount * (1.0 / 3.0) * r * r * r;
+            }
+        }
+        DistortionMode::ArcTangent => {
+            // I need to figure this out. It doesn't seem to be working right.
+            for sample_idx in 0..num_samples {
+                let l = output[0][sample_idx];
+                let r = output[1][sample_idx];
+                output[0][sample_idx] =
+                    (2.0 / std::f32::consts::PI) * (l * distortion_amount).atan();
+                output[1][sample_idx] =
+                    (2.0 / std::f32::consts::PI) * (r * distortion_amount).atan();
+            }
+        }
+        _ => (),
     }
 
     ProcessStatus::Normal
