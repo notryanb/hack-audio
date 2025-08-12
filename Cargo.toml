@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "hack_audio"
+name = "hack_audio_standalone"
 path = "src/main.rs"
 
 [lib]

@@ -71,6 +71,9 @@ pub enum DistortionMode {
 
     #[id = "diode"]
     Diode,
+
+    #[id = "bit-crush"]
+    BitCrush,
 }
 
 impl DistortionMode {
@@ -82,11 +85,13 @@ impl DistortionMode {
             DistortionMode::ExponentialSoftClipping => 3.0,
             DistortionMode::PieceWiseOverDrive => 4.0,
             DistortionMode::Diode => 5.0,
+            DistortionMode::BitCrush => 6.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
+            6.0 => DistortionMode::BitCrush,
             5.0 => DistortionMode::Diode,
             4.0 => DistortionMode::PieceWiseOverDrive,
             3.0 => DistortionMode::ExponentialSoftClipping,
@@ -173,6 +178,12 @@ pub struct PluginParams {
 
     #[id = "distortion_amount"]
     pub distortion_amount: FloatParam,
+
+    #[id = "bit-crush-bits"]
+    pub bit_crush_bits: IntParam,
+
+    #[id = "distortion-mix"]
+    pub distortion_mix: FloatParam,
 }
 
 impl Default for HackAudio {
@@ -219,6 +230,22 @@ impl Default for PluginParams {
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            distortion_mix: FloatParam::new(
+                "Distortion Mix",
+                0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 100.0,
+                },
+            )
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            bit_crush_bits: IntParam::new(
+                "BitCrush Bits",
+                16,
+                IntRange::Linear { min: 1, max: 16 },
+            ),
         }
     }
 }
@@ -403,7 +430,20 @@ impl Plugin for HackAudio {
                                     &params.distortion_amount,
                                     setter,
                                 ));
-                                ui.horizontal(|ui| {
+
+                                ui.label("Distortion Mix");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.distortion_mix,
+                                    setter,
+                                ));
+
+                                ui.label("Bit Crush Bits");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.bit_crush_bits,
+                                    setter,
+                                ));
+
+                                ui.horizontal_wrapped(|ui| {
                                     if ui
                                         .add(egui::widgets::SelectableLabel::new(
                                             *distortion_mode == DistortionMode::InfiniteClipping,
@@ -489,7 +529,21 @@ impl Plugin for HackAudio {
                                         );
                                         setter.end_set_parameter(&params.distortion_mode);
                                     }
-                                });
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::BitCrush,
+                                            "BitCrush",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::BitCrush,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                }); // horizontal UI end
                             }
                             Fx::Goniometer => {
                                 ui.label("Stereo Visualizer (Goniometer)");
@@ -664,93 +718,197 @@ pub fn distortion_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>
     let output = buffer.as_slice();
     let distortion_mode = params.distortion_mode.value();
     let distortion_amount = params.distortion_amount.value();
+    let distortion_mix = params.distortion_mix.value();
+    let bit_crush_bits = params.bit_crush_bits.value();
 
-    match distortion_mode {
-        DistortionMode::InfiniteClipping => {
-            for sample_idx in 0..num_samples {
-                if output[0][sample_idx] > 0.0 {
-                    output[0][sample_idx] = lerp(output[0][sample_idx], 1.0, distortion_amount);
-                } else if output[0][sample_idx] < 0.0 {
-                    output[0][sample_idx] = -lerp(-output[0][sample_idx], 1.0, distortion_amount);
+    let gain = distortion_mix / 100.0;
+
+    for sample_idx in 0..num_samples {
+        // l/r channels
+        let mut l = output[0][sample_idx];
+        let mut r = output[1][sample_idx];
+
+        // apply distortion algorithm
+        // This might not be the best because this match happens every sample.
+        match distortion_mode {
+            DistortionMode::InfiniteClipping => {
+                if l > 0.0 {
+                    l = lerp(l, 1.0, distortion_amount);
+                } else if l < 0.0 {
+                    l = -lerp(-l, 1.0, distortion_amount);
                 }
 
-                if output[1][sample_idx] > 0.0 {
-                    output[1][sample_idx] = lerp(output[1][sample_idx], 1.0, distortion_amount);
-                } else if output[1][sample_idx] < 0.0 {
-                    output[1][sample_idx] = -lerp(-output[1][sample_idx], 1.0, distortion_amount);
+                if r > 0.0 {
+                    r = lerp(r, 1.0, distortion_amount);
+                } else if l < 0.0 {
+                    r = -lerp(-r, 1.0, distortion_amount);
                 }
             }
-        }
-        DistortionMode::Cubic => {
-            for sample_idx in 0..num_samples {
-                let l = output[0][sample_idx];
-                let r = output[1][sample_idx];
-                output[0][sample_idx] = l - distortion_amount * (1.0 / 3.0) * l * l * l;
-                output[1][sample_idx] = r - distortion_amount * (1.0 / 3.0) * r * r * r;
+            DistortionMode::Cubic => {
+                l = l - distortion_amount * (1.0 / 3.0) * l * l * l;
+                r = r - distortion_amount * (1.0 / 3.0) * r * r * r;
             }
-        }
-        // With arctangent and exponential soft clipping,
-        // I wonder if setting the gain or alpha to the lowest setting should return the original sample?
-        DistortionMode::ArcTangent => {
-            let alpha = (distortion_amount * 10.0).max(1.0);
-            for sample_idx in 0..num_samples {
-                let l = output[0][sample_idx];
-                let r = output[1][sample_idx];
-
-                output[0][sample_idx] = (2.0 / std::f32::consts::PI) * (l * alpha).atan();
-                output[1][sample_idx] = (2.0 / std::f32::consts::PI) * (r * alpha).atan();
+            // With arctangent and exponential soft clipping,
+            // I wonder if setting the gain or alpha to the lowest setting should return the original sample?
+            DistortionMode::ArcTangent => {
+                let alpha = (distortion_amount * 10.0).max(1.0);
+                l = (2.0 / std::f32::consts::PI) * (l * alpha).atan();
+                r = (2.0 / std::f32::consts::PI) * (r * alpha).atan();
             }
-        }
-        DistortionMode::ExponentialSoftClipping => {
-            let gain = (distortion_amount * 10.0).max(1.0);
-            for sample_idx in 0..num_samples {
-                let l = output[0][sample_idx];
-                let r = output[1][sample_idx];
-
-                output[0][sample_idx] = (l / l.abs()) * (1.0 - (-(gain * l).abs()).exp());
-                output[1][sample_idx] = (r / r.abs()) * (1.0 - (-(gain * r).abs()).exp());
+            DistortionMode::ExponentialSoftClipping => {
+                let gain = (distortion_amount * 10.0).max(1.0);
+                l = (l / l.abs()) * (1.0 - (-(gain * l).abs()).exp());
+                r = (r / r.abs()) * (1.0 - (-(gain * r).abs()).exp());
             }
-        }
-        DistortionMode::PieceWiseOverDrive => {
-            for sample_idx in 0..num_samples {
-                let l = output[0][sample_idx];
-                let r = output[1][sample_idx];
-
+            DistortionMode::PieceWiseOverDrive => {
                 if l.abs() <= 1.0 / 3.0 {
-                    output[0][sample_idx] = 2.0 * l;
+                    l = 2.0 * l;
                 } else if l.abs() > 2.0 / 3.0 {
-                    output[0][sample_idx] = l / l.abs();
+                    l = l / l.abs();
                 } else {
-                    output[0][sample_idx] = (l / l.abs())
+                    l = (l / l.abs())
                         * ((3.0 - (2.0 - 3.0 * l.abs()) * (2.0 - 3.0 * l.abs())) / 3.0);
                 }
 
                 if r.abs() <= 1.0 / 3.0 {
-                    output[1][sample_idx] = 2.0 * r;
+                    r = 2.0 * r;
                 } else if r.abs() > 2.0 / 3.0 {
-                    output[1][sample_idx] = r / r.abs();
+                    r = r / r.abs();
                 } else {
-                    output[1][sample_idx] = (r / r.abs())
+                    r = (r / r.abs())
                         * ((3.0 - (2.0 - 3.0 * r.abs()) * (2.0 - 3.0 * r.abs())) / 3.0);
                 }
             }
-        }
-        DistortionMode::Diode => {
-            let thermal_voltage = 0.0253;
-            let emission_coefficient = 1.68;
-            let saturation_current = 0.105;
+            DistortionMode::Diode => {
+                let thermal_voltage = 0.0253;
+                let emission_coefficient = 1.68;
+                let saturation_current = 0.105;
 
-            for sample_idx in 0..num_samples {
-                let l = output[0][sample_idx];
-                let r = output[1][sample_idx];
-
-                output[0][sample_idx] = saturation_current
+                l = saturation_current
                     * ((0.1 * l / (emission_coefficient * thermal_voltage)).exp() - 1.0);
-                output[1][sample_idx] = saturation_current
+                r = saturation_current
                     * ((0.1 * r / (emission_coefficient * thermal_voltage)).exp() - 1.0);
             }
+            DistortionMode::BitCrush => {
+                let amplitude_values = 2_u32.pow(bit_crush_bits.try_into().unwrap());
+
+                l = (0.5 * l) + 0.5;
+                r = (0.5 * r) + 0.5;
+
+                l = 2.0 * ((l * amplitude_values as f32).round() / amplitude_values as f32) - 1.0;
+                r = 2.0 * ((r * amplitude_values as f32).round() / amplitude_values as f32) - 1.0;
+            }
         }
+
+        // adjust gain using parallel mix wet/dry
+        l = gain * l + (1.0 - gain) * output[0][sample_idx];
+        r = gain * r + (1.0 - gain) * output[1][sample_idx];
+
+        // write back to output buffer
+        output[0][sample_idx] = l;
+        output[1][sample_idx] = r;
     }
+
+    // match distortion_mode {
+    // DistortionMode::InfiniteClipping => {
+    //     for sample_idx in 0..num_samples {
+    //         if output[0][sample_idx] > 0.0 {
+    //             output[0][sample_idx] = lerp(output[0][sample_idx], 1.0, distortion_amount);
+    //         } else if output[0][sample_idx] < 0.0 {
+    //             output[0][sample_idx] = -lerp(-output[0][sample_idx], 1.0, distortion_amount);
+    //         }
+
+    //         if output[1][sample_idx] > 0.0 {
+    //             output[1][sample_idx] = lerp(output[1][sample_idx], 1.0, distortion_amount);
+    //         } else if output[1][sample_idx] < 0.0 {
+    //             output[1][sample_idx] = -lerp(-output[1][sample_idx], 1.0, distortion_amount);
+    //         }
+    //     }
+    // }
+    // DistortionMode::Cubic => {
+    //     for sample_idx in 0..num_samples {
+    //         let l = output[0][sample_idx];
+    //         let r = output[1][sample_idx];
+    //         output[0][sample_idx] = l - distortion_amount * (1.0 / 3.0) * l * l * l;
+    //         output[1][sample_idx] = r - distortion_amount * (1.0 / 3.0) * r * r * r;
+    //     }
+    // }
+    // // With arctangent and exponential soft clipping,
+    // // I wonder if setting the gain or alpha to the lowest setting should return the original sample?
+    // DistortionMode::ArcTangent => {
+    //     let alpha = (distortion_amount * 10.0).max(1.0);
+    //     for sample_idx in 0..num_samples {
+    //         let l = output[0][sample_idx];
+    //         let r = output[1][sample_idx];
+
+    //         output[0][sample_idx] = (2.0 / std::f32::consts::PI) * (l * alpha).atan();
+    //         output[1][sample_idx] = (2.0 / std::f32::consts::PI) * (r * alpha).atan();
+    //     }
+    // }
+    // DistortionMode::ExponentialSoftClipping => {
+    //     let gain = (distortion_amount * 10.0).max(1.0);
+    //     for sample_idx in 0..num_samples {
+    //         let l = output[0][sample_idx];
+    //         let r = output[1][sample_idx];
+
+    //         output[0][sample_idx] = (l / l.abs()) * (1.0 - (-(gain * l).abs()).exp());
+    //         output[1][sample_idx] = (r / r.abs()) * (1.0 - (-(gain * r).abs()).exp());
+    //     }
+    // }
+    // DistortionMode::PieceWiseOverDrive => {
+    //     for sample_idx in 0..num_samples {
+    //         let l = output[0][sample_idx];
+    //         let r = output[1][sample_idx];
+
+    //         if l.abs() <= 1.0 / 3.0 {
+    //             output[0][sample_idx] = 2.0 * l;
+    //         } else if l.abs() > 2.0 / 3.0 {
+    //             output[0][sample_idx] = l / l.abs();
+    //         } else {
+    //             output[0][sample_idx] = (l / l.abs())
+    //                 * ((3.0 - (2.0 - 3.0 * l.abs()) * (2.0 - 3.0 * l.abs())) / 3.0);
+    //         }
+
+    //         if r.abs() <= 1.0 / 3.0 {
+    //             output[1][sample_idx] = 2.0 * r;
+    //         } else if r.abs() > 2.0 / 3.0 {
+    //             output[1][sample_idx] = r / r.abs();
+    //         } else {
+    //             output[1][sample_idx] = (r / r.abs())
+    //                 * ((3.0 - (2.0 - 3.0 * r.abs()) * (2.0 - 3.0 * r.abs())) / 3.0);
+    //         }
+    //     }
+    // }
+    // DistortionMode::Diode => {
+    //     let thermal_voltage = 0.0253;
+    //     let emission_coefficient = 1.68;
+    //     let saturation_current = 0.105;
+
+    //     for sample_idx in 0..num_samples {
+    //         let l = output[0][sample_idx];
+    //         let r = output[1][sample_idx];
+
+    //         output[0][sample_idx] = saturation_current
+    //             * ((0.1 * l / (emission_coefficient * thermal_voltage)).exp() - 1.0);
+    //         output[1][sample_idx] = saturation_current
+    //             * ((0.1 * r / (emission_coefficient * thermal_voltage)).exp() - 1.0);
+    //     }
+    // }
+    // DistortionMode::BitCrush => {
+    //     let amplitude_values = 2_u32.pow(bit_crush_bits.try_into().unwrap());
+
+    //     for sample_idx in 0..num_samples {
+    //         // translate into the 0..1 range. Assumes the samples are -1..1
+    //         let l = (0.5 * output[0][sample_idx]) + 0.5;
+    //         let r = (0.5 * output[1][sample_idx]) + 0.5;
+
+    //         output[0][sample_idx] =
+    //             2.0 * ((l * amplitude_values as f32).round() / amplitude_values as f32) - 1.0;
+    //         output[1][sample_idx] =
+    //             2.0 * ((r * amplitude_values as f32).round() / amplitude_values as f32) - 1.0;
+    //     }
+    // }
+    // }
 
     ProcessStatus::Normal
 }
