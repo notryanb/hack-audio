@@ -60,11 +60,17 @@ pub enum DistortionMode {
     #[id = "arctangent"]
     ArcTangent,
 
-    #[id = "sine"]
-    Sine,
-
     #[id = "inf-clip"]
     InfiniteClipping,
+
+    #[id = "exp-soft-clip"]
+    ExponentialSoftClipping,
+
+    #[id = "piece-wise-ovdrv"]
+    PieceWiseOverDrive,
+
+    #[id = "diode"]
+    Diode,
 }
 
 impl DistortionMode {
@@ -72,15 +78,19 @@ impl DistortionMode {
         match gm {
             DistortionMode::Cubic => 0.0,
             DistortionMode::ArcTangent => 1.0,
-            DistortionMode::Sine => 2.0,
-            DistortionMode::InfiniteClipping => 3.0,
+            DistortionMode::InfiniteClipping => 2.0,
+            DistortionMode::ExponentialSoftClipping => 3.0,
+            DistortionMode::PieceWiseOverDrive => 4.0,
+            DistortionMode::Diode => 5.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
-            3.0 => DistortionMode::InfiniteClipping,
-            2.0 => DistortionMode::Sine,
+            5.0 => DistortionMode::Diode,
+            4.0 => DistortionMode::PieceWiseOverDrive,
+            3.0 => DistortionMode::ExponentialSoftClipping,
+            2.0 => DistortionMode::InfiniteClipping,
             1.0 => DistortionMode::ArcTangent,
             _ => DistortionMode::Cubic,
         }
@@ -438,15 +448,44 @@ impl Plugin for HackAudio {
                                     }
                                     if ui
                                         .add(egui::widgets::SelectableLabel::new(
-                                            *distortion_mode == DistortionMode::Sine,
-                                            "Sine",
+                                            *distortion_mode
+                                                == DistortionMode::ExponentialSoftClipping,
+                                            "Exponential Soft Clipping",
                                         ))
                                         .clicked()
                                     {
                                         setter.begin_set_parameter(&params.distortion_mode);
                                         setter.set_parameter(
                                             &params.distortion_mode,
-                                            DistortionMode::Sine,
+                                            DistortionMode::ExponentialSoftClipping,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::PieceWiseOverDrive,
+                                            "Piece-Wise Overdrive",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::PieceWiseOverDrive,
+                                        );
+                                        setter.end_set_parameter(&params.distortion_mode);
+                                    }
+                                    if ui
+                                        .add(egui::widgets::SelectableLabel::new(
+                                            *distortion_mode == DistortionMode::Diode,
+                                            "Diode",
+                                        ))
+                                        .clicked()
+                                    {
+                                        setter.begin_set_parameter(&params.distortion_mode);
+                                        setter.set_parameter(
+                                            &params.distortion_mode,
+                                            DistortionMode::Diode,
                                         );
                                         setter.end_set_parameter(&params.distortion_mode);
                                     }
@@ -650,18 +689,67 @@ pub fn distortion_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>
                 output[1][sample_idx] = r - distortion_amount * (1.0 / 3.0) * r * r * r;
             }
         }
+        // With arctangent and exponential soft clipping,
+        // I wonder if setting the gain or alpha to the lowest setting should return the original sample?
         DistortionMode::ArcTangent => {
-            // I need to figure this out. It doesn't seem to be working right.
+            let alpha = (distortion_amount * 10.0).max(1.0);
             for sample_idx in 0..num_samples {
                 let l = output[0][sample_idx];
                 let r = output[1][sample_idx];
-                output[0][sample_idx] =
-                    (2.0 / std::f32::consts::PI) * (l * distortion_amount).atan();
-                output[1][sample_idx] =
-                    (2.0 / std::f32::consts::PI) * (r * distortion_amount).atan();
+
+                output[0][sample_idx] = (2.0 / std::f32::consts::PI) * (l * alpha).atan();
+                output[1][sample_idx] = (2.0 / std::f32::consts::PI) * (r * alpha).atan();
             }
         }
-        _ => (),
+        DistortionMode::ExponentialSoftClipping => {
+            let gain = (distortion_amount * 10.0).max(1.0);
+            for sample_idx in 0..num_samples {
+                let l = output[0][sample_idx];
+                let r = output[1][sample_idx];
+
+                output[0][sample_idx] = (l / l.abs()) * (1.0 - (-(gain * l).abs()).exp());
+                output[1][sample_idx] = (r / r.abs()) * (1.0 - (-(gain * r).abs()).exp());
+            }
+        }
+        DistortionMode::PieceWiseOverDrive => {
+            for sample_idx in 0..num_samples {
+                let l = output[0][sample_idx];
+                let r = output[1][sample_idx];
+
+                if l.abs() <= 1.0 / 3.0 {
+                    output[0][sample_idx] = 2.0 * l;
+                } else if l.abs() > 2.0 / 3.0 {
+                    output[0][sample_idx] = l / l.abs();
+                } else {
+                    output[0][sample_idx] = (l / l.abs())
+                        * ((3.0 - (2.0 - 3.0 * l.abs()) * (2.0 - 3.0 * l.abs())) / 3.0);
+                }
+
+                if r.abs() <= 1.0 / 3.0 {
+                    output[1][sample_idx] = 2.0 * r;
+                } else if r.abs() > 2.0 / 3.0 {
+                    output[1][sample_idx] = r / r.abs();
+                } else {
+                    output[1][sample_idx] = (r / r.abs())
+                        * ((3.0 - (2.0 - 3.0 * r.abs()) * (2.0 - 3.0 * r.abs())) / 3.0);
+                }
+            }
+        }
+        DistortionMode::Diode => {
+            let thermal_voltage = 0.0253;
+            let emission_coefficient = 1.68;
+            let saturation_current = 0.105;
+
+            for sample_idx in 0..num_samples {
+                let l = output[0][sample_idx];
+                let r = output[1][sample_idx];
+
+                output[0][sample_idx] = saturation_current
+                    * ((0.1 * l / (emission_coefficient * thermal_voltage)).exp() - 1.0);
+                output[1][sample_idx] = saturation_current
+                    * ((0.1 * r / (emission_coefficient * thermal_voltage)).exp() - 1.0);
+            }
+        }
     }
 
     ProcessStatus::Normal
