@@ -25,6 +25,9 @@ pub enum Fx {
 
     #[id = "distortion"]
     Distortion,
+
+    #[id = "delay"]
+    Delay,
 }
 
 impl Fx {
@@ -35,11 +38,13 @@ impl Fx {
             Fx::MidSideDecode => 2.0,
             Fx::Goniometer => 3.0,
             Fx::Distortion => 4.0,
+            Fx::Delay => 4.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
+            5.0 => Fx::Delay,
             4.0 => Fx::Distortion,
             3.0 => Fx::Goniometer,
             2.0 => Fx::MidSideDecode,
@@ -132,6 +137,22 @@ impl PanningMode {
     }
 }
 
+pub struct DelayBuffer {
+    pub current_index: usize,
+    pub left_buffer: [f32; 192_000],
+    pub right_buffer: [f32; 192_000],
+}
+
+impl Default for DelayBuffer {
+    fn default() -> Self {
+        Self {
+            current_index: 0,
+            left_buffer: [0.0; 192_000],
+            right_buffer: [0.0; 192_000],
+        }
+    }
+}
+
 pub struct OutputBuffer {
     pub left: [f32; 4096],
     pub right: [f32; 4096],
@@ -152,6 +173,7 @@ pub struct HackAudio {
     ui_state: UiState,
     goniometer_input: triple_buffer::Input<OutputBuffer>,
     goniometer_output: Arc<Mutex<triple_buffer::Output<OutputBuffer>>>,
+    delay_buffer: DelayBuffer,
 }
 
 #[derive(Params)]
@@ -184,6 +206,12 @@ pub struct PluginParams {
 
     #[id = "distortion-mix"]
     pub distortion_mix: FloatParam,
+
+    #[id = "delay-feedback"]
+    pub delay_feedback: FloatParam,
+
+    #[id = "delay-time"]
+    pub delay_time: IntParam,
 }
 
 impl Default for HackAudio {
@@ -193,6 +221,7 @@ impl Default for HackAudio {
             params: Arc::new(PluginParams::default()),
             goniometer_input: goniometer_input,
             goniometer_output: Arc::new(Mutex::new(goniometer_output)),
+            delay_buffer: DelayBuffer::default(),
             ui_state: UiState {},
         }
     }
@@ -246,6 +275,25 @@ impl Default for PluginParams {
                 16,
                 IntRange::Linear { min: 1, max: 16 },
             ),
+
+            delay_feedback: FloatParam::new(
+                "Delay Feedback",
+                0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 1.0,
+                },
+            )
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            delay_time: IntParam::new(
+                "Delay Time",
+                50,
+                IntRange::Linear {
+                    min: 50,
+                    max: 1000,
+                },
+            )
         }
     }
 }
@@ -356,6 +404,18 @@ impl Plugin for HackAudio {
                                     setter.set_parameter(&params.selected_fx, Fx::Distortion);
                                     setter.end_set_parameter(&params.selected_fx);
                                 }
+
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::Delay,
+                                        "Delay",
+                                    ))
+                                    .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::Delay);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }
                             });
                         });
 
@@ -420,6 +480,20 @@ impl Plugin for HackAudio {
                             }
                             Fx::MidSideDecode => {
                                 ui.label("MidSideDecode");
+                            }
+                            Fx::Delay => {
+                                ui.label("Delay");
+
+                                ui.label("Delay Time (ms)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.delay_time,
+                                    setter,
+                                ));
+
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.delay_feedback,
+                                    setter,
+                                ));
                             }
                             Fx::Distortion => {
                                 ui.label("Distortion");
@@ -647,6 +721,7 @@ impl Plugin for HackAudio {
                 goniometer_plugin_process(buffer, &self.params, &mut self.goniometer_input)
             }
             Fx::Distortion => distortion_plugin_process(buffer, &self.params),
+            Fx::Delay => delay_plugin_process(buffer, &self.params, &mut self.delay_buffer),
         }
     }
 }
@@ -703,6 +778,50 @@ pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -
 
                 *sample *= new_sample;
             }
+        }
+    }
+
+    ProcessStatus::Normal
+}
+
+pub fn delay_plugin_process(
+    buffer: &mut Buffer, 
+    params: &Arc<PluginParams>,
+    delay: &mut DelayBuffer,
+) -> ProcessStatus {
+    let feedback = params.delay_feedback.value();
+    let delay_time_ms = params.delay_time.value();
+    let sample_rate = 48000.0; // TODO - This should be tracked by the plugin and passed in
+    let delay_buffer_bounds = sample_rate * (delay_time_ms as f32 / 1000.0);
+    let num_samples = buffer.samples();
+    let output = buffer.as_slice();
+
+    for sample_idx in 0..num_samples {
+        let out_l = output[0][sample_idx];
+        let out_r = output[1][sample_idx];
+        let mut delay_l = delay.left_buffer[sample_idx + delay.current_index];
+        let mut delay_r = delay.right_buffer[sample_idx + delay.current_index];
+
+        // Update the delay buffer's state
+        let new_delay_l = out_l + delay_l * feedback;
+        let new_delay_r = out_r + delay_r * feedback;
+
+        // if delay_l < 0.0004 {
+        //     delay_l = 0.0;
+        // }
+        // if delay_r < 0.0004 {
+        //     delay_r = 0.0;
+        // }
+        
+        // update the output and delay buffer
+        delay.left_buffer[sample_idx + delay.current_index] = new_delay_l;
+        delay.right_buffer[sample_idx + delay.current_index] = new_delay_r;
+        output[0][sample_idx] = new_delay_l;
+        output[1][sample_idx] = new_delay_r;
+
+        delay.current_index += 1;
+        if delay.current_index > delay_buffer_bounds as usize {
+            delay.current_index = 0;
         }
     }
 
