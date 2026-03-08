@@ -139,16 +139,17 @@ impl PanningMode {
 
 pub struct DelayBuffer {
     pub current_index: usize,
-    pub left_buffer: [f32; 192_000],
-    pub right_buffer: [f32; 192_000],
+    // Must heap allocate. Creating arrays allocates on the stack and this blows up on windows when the buffers are large.
+    pub left_buffer: Vec<f32>,
+    pub right_buffer: Vec<f32>,
 }
 
 impl Default for DelayBuffer {
     fn default() -> Self {
         Self {
             current_index: 0,
-            left_buffer: [0.0; 192_000],
-            right_buffer: [0.0; 192_000],
+            left_buffer: vec![0.0; 192_000],
+            right_buffer: vec![0.0; 192_000],
         }
     }
 }
@@ -791,7 +792,7 @@ pub fn delay_plugin_process(
 ) -> ProcessStatus {
     let feedback = params.delay_feedback.value();
     let delay_time_ms = params.delay_time.value();
-    let sample_rate = 48000.0; // TODO - This should be tracked by the plugin and passed in
+    let sample_rate = 44100.0; // TODO - This should be tracked by the plugin and passed in
     let delay_buffer_bounds = sample_rate * (delay_time_ms as f32 / 1000.0);
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
@@ -799,8 +800,8 @@ pub fn delay_plugin_process(
     for sample_idx in 0..num_samples {
         let out_l = output[0][sample_idx];
         let out_r = output[1][sample_idx];
-        let mut delay_l = delay.left_buffer[sample_idx + delay.current_index];
-        let mut delay_r = delay.right_buffer[sample_idx + delay.current_index];
+        let delay_l = delay.left_buffer[sample_idx + delay.current_index];
+        let delay_r = delay.right_buffer[sample_idx + delay.current_index];
 
         // Update the delay buffer's state
         let new_delay_l = out_l + delay_l * feedback;
