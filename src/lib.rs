@@ -1,4 +1,5 @@
 use nih_plug::prelude::*;
+use nih_plug::util::db_to_gain;
 use nih_plug_egui::{
     EguiState, create_egui_editor, egui,
     egui::emath,
@@ -210,10 +211,20 @@ pub struct PluginParams {
     pub distortion_mix: FloatParam,
 
     #[id = "delay-feedback"]
-    pub delay_feedback: FloatParam,
+    pub delay_feedback: IntParam,
 
     #[id = "delay-time"]
     pub delay_time: IntParam,
+
+    #[id = "delay-mix-in"]
+    pub delay_mix_in: IntParam,
+
+    #[id = "delay-wet-out"]
+    pub delay_wet_out: IntParam,
+
+    #[id = "delay-dry-out"]
+    pub delay_dry_out: IntParam,
+
 }
 
 impl Default for HackAudio {
@@ -279,24 +290,55 @@ impl Default for PluginParams {
                 IntRange::Linear { min: 1, max: 16 },
             ),
 
-            delay_feedback: FloatParam::new(
+            delay_feedback: IntParam::new(
                 "Delay Feedback",
-                0.0,
-                FloatRange::Linear {
-                    min: 0.0,
-                    max: 1.0,
+                -5,
+                IntRange::Linear {
+                    min: -120,
+                    max: 6,
                 },
             )
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            .with_unit(" dB"),
 
             delay_time: IntParam::new(
                 "Delay Time",
-                50,
+                300,
                 IntRange::Linear {
                     min: 50,
                     max: 1000,
                 },
             )
+            .with_unit(" dB"),
+            
+            delay_mix_in: IntParam::new(
+                "Delay Mix In",
+                0,
+                IntRange::Linear {
+                    min: -120,
+                    max: 6,
+                },
+            )
+            .with_unit(" dB"),
+
+            delay_wet_out: IntParam::new(
+                "Delay Wet Out",
+                -6,
+                IntRange::Linear {
+                    min: -120,
+                    max: 6,
+                },
+            )
+            .with_unit(" dB"),
+
+            delay_dry_out: IntParam::new(
+                "Delay Dry Out",
+                0,
+                IntRange::Linear {
+                    min: -120,
+                    max: 6,
+                },
+            )
+            .with_unit(" dB"),
         }
     }
 }
@@ -493,8 +535,27 @@ impl Plugin for HackAudio {
                                     setter,
                                 ));
 
+                                ui.label("Feedback (dB)");
                                 ui.add(widgets::ParamSlider::for_param(
                                     &params.delay_feedback,
+                                    setter,
+                                ));
+
+                                ui.label("Mix In (dB)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.delay_mix_in,
+                                    setter,
+                                ));
+
+                                ui.label("Out Wet Mix (dB)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.delay_wet_out,
+                                    setter,
+                                ));
+
+                                ui.label("Out Dry Mix (dB)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.delay_dry_out,
                                     setter,
                                 ));
                             }
@@ -795,7 +856,11 @@ pub fn delay_plugin_process(
     params: &Arc<PluginParams>,
     delay: &mut DelayBuffer,
 ) -> ProcessStatus {
-    let feedback = params.delay_feedback.value();
+    let feedback = db_to_gain(params.delay_feedback.value() as f32);
+    let mix_in = db_to_gain(params.delay_mix_in.value() as f32);
+    let wet_out = db_to_gain(params.delay_wet_out.value() as f32);
+    let dry_out = db_to_gain(params.delay_dry_out.value() as f32);
+
     let delay_time_ms = params.delay_time.value();
     let delay_samples = (sample_rate * (delay_time_ms as f32 / 1000.0)) as usize;
     let buffer_len = delay.left_buffer.len();
@@ -812,13 +877,11 @@ pub fn delay_plugin_process(
         let delay_l = delay.left_buffer[read_idx];
         let delay_r = delay.right_buffer[read_idx];
 
-        // Write dry signal + fed-back delay into the write position
-        delay.left_buffer[write_idx] = dry_l + delay_l * feedback;
-        delay.right_buffer[write_idx] = dry_r + delay_r * feedback;
+        delay.left_buffer[write_idx] = (((dry_l * mix_in) + (delay_l * feedback)).max(-4.0)).min(4.0);
+        delay.right_buffer[write_idx] = (((dry_r * mix_in) + (delay_r * feedback)).max(-4.0)).min(4.0);
 
-        // Mix dry + wet to output
-        output[0][sample_idx] = dry_l + delay_l;
-        output[1][sample_idx] = dry_r + delay_r;
+        output[0][sample_idx] = dry_l * dry_out + delay_l * wet_out; 
+        output[1][sample_idx] = dry_r * dry_out + delay_r * wet_out; 
     }
 
     delay.current_index = (delay.current_index + num_samples) % buffer_len;
