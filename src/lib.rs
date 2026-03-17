@@ -172,6 +172,7 @@ impl Default for OutputBuffer {
 pub struct HackAudio {
     params: Arc<PluginParams>,
     ui_state: UiState,
+    host_sample_rate: f32,
     goniometer_input: triple_buffer::Input<OutputBuffer>,
     goniometer_output: Arc<Mutex<triple_buffer::Output<OutputBuffer>>>,
     delay_buffer: DelayBuffer,
@@ -223,6 +224,7 @@ impl Default for HackAudio {
             goniometer_input: goniometer_input,
             goniometer_output: Arc::new(Mutex::new(goniometer_output)),
             delay_buffer: DelayBuffer::default(),
+            host_sample_rate: 44100.0,
             ui_state: UiState {},
         }
     }
@@ -700,9 +702,10 @@ impl Plugin for HackAudio {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        self.host_sample_rate = buffer_config.sample_rate;
         true
     }
 
@@ -713,6 +716,7 @@ impl Plugin for HackAudio {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let selected_fx = self.params.selected_fx.value();
+        let sample_rate = self.host_sample_rate;
 
         match selected_fx {
             Fx::Panning => panning_plugin_process(buffer, &self.params),
@@ -722,7 +726,7 @@ impl Plugin for HackAudio {
                 goniometer_plugin_process(buffer, &self.params, &mut self.goniometer_input)
             }
             Fx::Distortion => distortion_plugin_process(buffer, &self.params),
-            Fx::Delay => delay_plugin_process(buffer, &self.params, &mut self.delay_buffer),
+            Fx::Delay => delay_plugin_process(sample_rate, buffer, &self.params, &mut self.delay_buffer),
         }
     }
 }
@@ -786,45 +790,38 @@ pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -
 }
 
 pub fn delay_plugin_process(
+    sample_rate: f32,
     buffer: &mut Buffer, 
     params: &Arc<PluginParams>,
     delay: &mut DelayBuffer,
 ) -> ProcessStatus {
     let feedback = params.delay_feedback.value();
     let delay_time_ms = params.delay_time.value();
-    let sample_rate = 44100.0; // TODO - This should be tracked by the plugin and passed in
-    let delay_buffer_bounds = sample_rate * (delay_time_ms as f32 / 1000.0);
+    let delay_samples = (sample_rate * (delay_time_ms as f32 / 1000.0)) as usize;
+    let buffer_len = delay.left_buffer.len();
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
 
     for sample_idx in 0..num_samples {
-        let out_l = output[0][sample_idx];
-        let out_r = output[1][sample_idx];
-        let delay_l = delay.left_buffer[sample_idx + delay.current_index];
-        let delay_r = delay.right_buffer[sample_idx + delay.current_index];
+        let write_idx = (delay.current_index + sample_idx) % buffer_len;
+        let read_idx = (write_idx + buffer_len - delay_samples) % buffer_len;
 
-        // Update the delay buffer's state
-        let new_delay_l = out_l + delay_l * feedback;
-        let new_delay_r = out_r + delay_r * feedback;
+        let dry_l = output[0][sample_idx];
+        let dry_r = output[1][sample_idx];
 
-        // if delay_l < 0.0004 {
-        //     delay_l = 0.0;
-        // }
-        // if delay_r < 0.0004 {
-        //     delay_r = 0.0;
-        // }
-        
-        // update the output and delay buffer
-        delay.left_buffer[sample_idx + delay.current_index] = new_delay_l;
-        delay.right_buffer[sample_idx + delay.current_index] = new_delay_r;
-        output[0][sample_idx] = new_delay_l;
-        output[1][sample_idx] = new_delay_r;
+        let delay_l = delay.left_buffer[read_idx];
+        let delay_r = delay.right_buffer[read_idx];
 
-        delay.current_index += 1;
-        if delay.current_index > delay_buffer_bounds as usize {
-            delay.current_index = 0;
-        }
+        // Write dry signal + fed-back delay into the write position
+        delay.left_buffer[write_idx] = dry_l + delay_l * feedback;
+        delay.right_buffer[write_idx] = dry_r + delay_r * feedback;
+
+        // Mix dry + wet to output
+        output[0][sample_idx] = dry_l + delay_l;
+        output[1][sample_idx] = dry_r + delay_r;
     }
+
+    delay.current_index = (delay.current_index + num_samples) % buffer_len;
 
     ProcessStatus::Normal
 }
