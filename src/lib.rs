@@ -29,6 +29,9 @@ pub enum Fx {
 
     #[id = "delay"]
     Delay,
+
+    #[id = "chorus"]
+    Chorus,
 }
 
 impl Fx {
@@ -39,12 +42,14 @@ impl Fx {
             Fx::MidSideDecode => 2.0,
             Fx::Goniometer => 3.0,
             Fx::Distortion => 4.0,
-            Fx::Delay => 4.0,
+            Fx::Delay => 5.0,
+            Fx::Chorus => 6.0,
         }
     }
 
     pub fn from_f32(i: f32) -> Self {
         match i {
+            6.0 => Fx::Chorus,
             5.0 => Fx::Delay,
             4.0 => Fx::Distortion,
             3.0 => Fx::Goniometer,
@@ -138,6 +143,22 @@ impl PanningMode {
     }
 }
 
+pub struct Chorus {
+    buffer_idx: usize,
+    lfos: Vec<f32>,
+    buffer: Vec<f32>,
+}
+
+impl Default for Chorus {
+    fn default() -> Self {
+        Self {
+            buffer_idx: 0,
+            lfos: vec![0.0; 16],
+            buffer: vec![0.0; 4096]
+        }
+    }
+}
+
 pub struct DelayBuffer {
     pub current_index: usize,
     // Must heap allocate. Creating arrays allocates on the stack and this blows up on windows when the buffers are large.
@@ -177,6 +198,7 @@ pub struct HackAudio {
     goniometer_input: triple_buffer::Input<OutputBuffer>,
     goniometer_output: Arc<Mutex<triple_buffer::Output<OutputBuffer>>>,
     delay_buffer: DelayBuffer,
+    chorus: Chorus,
 }
 
 #[derive(Params)]
@@ -210,6 +232,9 @@ pub struct PluginParams {
     #[id = "distortion-mix"]
     pub distortion_mix: FloatParam,
 
+    // TODO: Make all of the delay params FloatParam
+    // Then skew the Range so the top half has more play
+    // Also need to step by 1.0
     #[id = "delay-feedback"]
     pub delay_feedback: IntParam,
 
@@ -225,7 +250,25 @@ pub struct PluginParams {
     #[id = "delay-dry-out"]
     pub delay_dry_out: IntParam,
 
+    #[id = "chorus-time"]
+    pub chorus_time: FloatParam,
+
+    #[id = "chorus-voice-count"]
+    pub chorus_voice_count: IntParam,
+
+    #[id = "chorus-rate"]
+    pub chorus_rate: FloatParam,
+
+    #[id = "chorus-depth"]
+    pub chorus_depth: FloatParam,
+
+    #[id = "chorus-out-mix-wet"]
+    pub chorus_out_mix_wet: FloatParam,
+
+    #[id = "chorus-out-mix-dry"]
+    pub chorus_out_mix_dry: FloatParam,
 }
+
 
 impl Default for HackAudio {
     fn default() -> Self {
@@ -235,6 +278,7 @@ impl Default for HackAudio {
             goniometer_input: goniometer_input,
             goniometer_output: Arc::new(Mutex::new(goniometer_output)),
             delay_buffer: DelayBuffer::default(),
+            chorus: Chorus::default(),
             host_sample_rate: 44100.0,
             ui_state: UiState {},
         }
@@ -308,7 +352,7 @@ impl Default for PluginParams {
                     max: 1000,
                 },
             )
-            .with_unit(" dB"),
+            .with_unit(" ms"),
             
             delay_mix_in: IntParam::new(
                 "Delay Mix In",
@@ -339,6 +383,62 @@ impl Default for PluginParams {
                 },
             )
             .with_unit(" dB"),
+
+            chorus_time: FloatParam::new(
+                "Chorus Time",
+                15.0,
+                FloatRange::Linear {
+                    min: 1.0,
+                    max: 250.0,
+                },
+                
+            ).with_unit(" ms"),
+
+            chorus_voice_count: IntParam::new(
+                "Chorus Voice Count",
+                1,
+                IntRange::Linear {
+                    min: 1,
+                    max: 8,
+                },
+            ),
+
+            chorus_rate: FloatParam::new(
+                "Chorus Rate",
+                0.5,
+                FloatRange::Linear {
+                    min: 0.1,
+                    max: 16.0,
+                },
+                
+            ).with_unit(" Hz"),
+
+            chorus_depth: FloatParam::new(
+                "Chorus Depth",
+                0.7,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 1.0,
+                },
+            ),
+
+            chorus_out_mix_wet: FloatParam::new(
+                "Chorus Out Mix Wet",
+                -6.0,
+                FloatRange::Linear {
+                    min: -100.0,
+                    max: 12.0,
+                },
+            ).with_unit(" Hz"),
+
+            chorus_out_mix_dry: FloatParam::new(
+                "Chorus Out Mix Dry",
+                -6.0,
+                FloatRange::Linear {
+                    min: -100.0,
+                    max: 12.0,
+                },
+            ).with_unit(" Hz"),
         }
     }
 }
@@ -461,6 +561,18 @@ impl Plugin for HackAudio {
                                     setter.set_parameter(&params.selected_fx, Fx::Delay);
                                     setter.end_set_parameter(&params.selected_fx);
                                 }
+
+                                if ui
+                                    .add(egui::widgets::SelectableLabel::new(
+                                        *selected_fx == Fx::Chorus,
+                                        "Chorus",
+                                    ))
+                                    .clicked()
+                                {
+                                    setter.begin_set_parameter(&params.selected_fx);
+                                    setter.set_parameter(&params.selected_fx, Fx::Chorus);
+                                    setter.end_set_parameter(&params.selected_fx);
+                                }
                             });
                         });
 
@@ -556,6 +668,45 @@ impl Plugin for HackAudio {
                                 ui.label("Out Dry Mix (dB)");
                                 ui.add(widgets::ParamSlider::for_param(
                                     &params.delay_dry_out,
+                                    setter,
+                                ));
+                            }
+                            Fx::Chorus => {
+                                ui.label("Chorus");
+
+                                ui.label("Chorus Time");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_time,
+                                    setter,
+                                ));
+                                
+                                ui.label("Chorus Voice Count");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_voice_count,
+                                    setter,
+                                ));
+
+                                ui.label("Chorus Rate");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_rate,
+                                    setter,
+                                ));
+
+                                ui.label("Chorus Depth");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_depth,
+                                    setter,
+                                ));
+
+                                ui.label("Out Wet Mix (dB)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_out_mix_wet,
+                                    setter,
+                                ));
+
+                                ui.label("Out Dry Mix (dB)");
+                                ui.add(widgets::ParamSlider::for_param(
+                                    &params.chorus_out_mix_dry,
                                     setter,
                                 ));
                             }
@@ -788,6 +939,7 @@ impl Plugin for HackAudio {
             }
             Fx::Distortion => distortion_plugin_process(buffer, &self.params),
             Fx::Delay => delay_plugin_process(sample_rate, buffer, &self.params, &mut self.delay_buffer),
+            Fx::Chorus => chorus_plugin_process(sample_rate, buffer, &self.params, &mut self.chorus),
         }
     }
 }
@@ -845,6 +997,44 @@ pub fn panning_plugin_process(buffer: &mut Buffer, params: &Arc<PluginParams>) -
                 *sample *= new_sample;
             }
         }
+    }
+
+    ProcessStatus::Normal
+}
+
+pub fn chorus_plugin_process(
+    sample_rate: f32,
+    buffer: &mut Buffer, 
+    params: &Arc<PluginParams>,
+    chorus: &mut Chorus,
+) -> ProcessStatus {
+    let chorus_time_ms = params.chorus_time.value();
+    let voice_count = params.chorus_voice_count.value();
+    let rate_hz = params.chorus_rate.value();
+    let rate_radians = rate_hz * 2.0 * std::f32::consts::PI / sample_rate;
+    let depth = params.chorus_depth.value();
+    let wet_out = db_to_gain(params.chorus_out_mix_wet.value() as f32);
+    let dry_out = db_to_gain(params.chorus_out_mix_dry.value() as f32);
+    let buffer_len = delay.left_buffer.len();
+    let num_samples = buffer.samples();
+    let output = buffer.as_slice();
+
+    let sample_length = chorus_time_ms * sample_rate * 0.001; // (ms * samples/sec * 0.001)
+
+    // Initialize lfos. This should be done once per change
+    for voice in 0..voice_count {
+        lfos[voice] = voice + 1 / voice_count * std::f32::consts::PI;
+    }
+
+    let spread = sample_length / voice_count * depth;
+
+    // Wrap the buffer around
+    if chorus.buffer_idx > sample_length {
+        chorus.buffer_idx = 0;
+    }
+
+    for sample_idx in 0..num_samples {
+        
     }
 
     ProcessStatus::Normal
