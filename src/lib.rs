@@ -154,7 +154,7 @@ impl Default for Chorus {
         Self {
             buffer_idx: 0,
             lfos: vec![0.0; 16],
-            buffer: vec![0.0; 4096]
+            buffer: vec![0.0; 192_000]
         }
     }
 }
@@ -1015,19 +1015,21 @@ pub fn chorus_plugin_process(
     let depth = params.chorus_depth.value();
     let wet_out = db_to_gain(params.chorus_out_mix_wet.value() as f32);
     let dry_out = db_to_gain(params.chorus_out_mix_dry.value() as f32);
+
+    let buffer_len = chorus.buffer.len();
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
 
     let sample_length = chorus_time_ms * sample_rate * 0.001; // (ms * samples/sec * 0.001)
     let spread = sample_length / voice_count as f32 * depth;
 
-    // Initialize lfos. This should be done once per change
+    // Initialize voice lfos. This should be done once per change
     for voice in 0..voice_count {
         chorus.lfos[voice as usize] = (voice + 1) as f32 / voice_count as f32 * std::f32::consts::PI;
     }
 
     // Wrap the buffer around
-    if chorus.buffer_idx > sample_length as usize {
+    if chorus.buffer_idx > chorus.buffer.len() {
         chorus.buffer_idx = 0;
     }
 
@@ -1035,6 +1037,9 @@ pub fn chorus_plugin_process(
         let left_in = output[0][sample_idx];
         let mut out = left_in * dry_out;
         let _dry_r = output[1][sample_idx] * dry_out;
+
+        let write_idx = (chorus.buffer_idx + sample_idx) % buffer_len;
+        let read_idx = (write_idx + buffer_len - sample_length) % buffer_len;
 
         let wet_mix = wet_out / voice_count as f32;
 
@@ -1044,9 +1049,10 @@ pub fn chorus_plugin_process(
                 - LERP the output value to be the current chorus buffer position with the next one.
                 - Add the LERPed value to the dry mixed value and set that as the output sample
         */
-        for voice in &chorus.lfos {
-            let voice_adv = voice + rate_radians;
-            let mut chorus_pos: f32 = chorus.buffer_idx as f32 - (0.5 + 0.49 * voice_adv.sin()) * (voice + 1.0) * spread;
+        for (voice_idx, voice) in chorus.lfos.iter().enumerate() {
+            // TODO - Experiment with different LFO shapes.
+            let voice_osc: f32 = voice + rate_radians;
+            let mut chorus_pos: f32 = chorus.buffer_idx as f32 - (0.5 + 0.49 * voice_osc.sin()) * (voice_idx + 1) as f32 * spread;
 
             if chorus_pos < 0.0 {
                 chorus_pos += sample_length;
@@ -1064,8 +1070,8 @@ pub fn chorus_plugin_process(
             out += wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
         }
 
-        chorus.buffer[chorus.buffer_idx] = left_in;
-        chorus.buffer_idx += 1;
+        // chorus.buffer[chorus.buffer_idx] = left_in; // This is causing a buffer overflow
+        // chorus.buffer_idx += 1;
 
         // Mono output
         output[0][sample_idx] = out;
