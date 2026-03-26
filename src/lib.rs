@@ -145,8 +145,8 @@ impl PanningMode {
 
 pub struct Chorus {
     buffer_idx: usize,
-    lfos: Vec<f32>,
     buffer: Vec<f32>,
+    lfos: Vec<f32>,
 }
 
 impl Default for Chorus {
@@ -1015,7 +1015,6 @@ pub fn chorus_plugin_process(
     let depth = params.chorus_depth.value();
     let wet_out = db_to_gain(params.chorus_out_mix_wet.value() as f32);
     let dry_out = db_to_gain(params.chorus_out_mix_dry.value() as f32);
-    let buffer_len = delay.left_buffer.len();
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
 
@@ -1023,18 +1022,48 @@ pub fn chorus_plugin_process(
 
     // Initialize lfos. This should be done once per change
     for voice in 0..voice_count {
-        lfos[voice] = voice + 1 / voice_count * std::f32::consts::PI;
+        chorus.lfos[voice as usize] = voice as f32 + 1.0 / voice_count as f32 * std::f32::consts::PI;
     }
 
-    let spread = sample_length / voice_count * depth;
+    let spread = sample_length / voice_count as f32 * depth;
 
     // Wrap the buffer around
-    if chorus.buffer_idx > sample_length {
+    if chorus.buffer_idx > sample_length as usize {
         chorus.buffer_idx = 0;
     }
 
     for sample_idx in 0..num_samples {
-        
+        let dry_l = output[0][sample_idx] * dry_out;
+        let _dry_r = output[1][sample_idx] * dry_out;
+
+        let wet_mix = wet_out / voice_count as f32;
+
+        for voice in &chorus.lfos {
+            // Advances this voice's LFO phase by rateadj, takes its sine, maps it to range [0.01, 0.99],
+            // then multiplies by (voice index + 1) * csize to get a unique, modulating read position behind bpos
+            // tpos = bpos - (0.5+0.49*sin( i[0] += rateadj)) * (i+1) * csize;
+            let voice_adv = voice + rate_radians;
+            let mut chorus_pos: f32 = chorus.buffer_idx as f32 - (0.5 + 0.49 * voice_adv.sin()) * (voice + 1.0) * spread;
+
+            if chorus_pos < 0.0 {
+                chorus_pos += sample_length;
+            }
+
+            let fractional = chorus_pos.fract();
+            let mut next_chorus_pos = chorus_pos + 1.0;
+            if chorus_pos > sample_length - 1.0 {
+                next_chorus_pos = 0.0;
+            }
+
+            let out_l = wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
+            output[0][sample_idx] += out_l;
+        }
+
+        chorus.buffer[chorus.buffer_idx] = dry_l;
+        chorus.buffer_idx += 1;
+
+        // Mono output
+        output[1][sample_idx] = output[0][sample_idx];
     }
 
     ProcessStatus::Normal
