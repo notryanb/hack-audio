@@ -1019,13 +1019,12 @@ pub fn chorus_plugin_process(
     let output = buffer.as_slice();
 
     let sample_length = chorus_time_ms * sample_rate * 0.001; // (ms * samples/sec * 0.001)
+    let spread = sample_length / voice_count as f32 * depth;
 
     // Initialize lfos. This should be done once per change
     for voice in 0..voice_count {
-        chorus.lfos[voice as usize] = voice as f32 + 1.0 / voice_count as f32 * std::f32::consts::PI;
+        chorus.lfos[voice as usize] = (voice + 1) as f32 / voice_count as f32 * std::f32::consts::PI;
     }
-
-    let spread = sample_length / voice_count as f32 * depth;
 
     // Wrap the buffer around
     if chorus.buffer_idx > sample_length as usize {
@@ -1033,15 +1032,19 @@ pub fn chorus_plugin_process(
     }
 
     for sample_idx in 0..num_samples {
-        let dry_l = output[0][sample_idx] * dry_out;
+        let left_in = output[0][sample_idx];
+        let mut out = left_in * dry_out;
         let _dry_r = output[1][sample_idx] * dry_out;
 
         let wet_mix = wet_out / voice_count as f32;
 
+        /*
+            Main algorithm
+            - For each LFO, calculate the LFO oscillator position, which will most likely not be an integer value
+                - LERP the output value to be the current chorus buffer position with the next one.
+                - Add the LERPed value to the dry mixed value and set that as the output sample
+        */
         for voice in &chorus.lfos {
-            // Advances this voice's LFO phase by rateadj, takes its sine, maps it to range [0.01, 0.99],
-            // then multiplies by (voice index + 1) * csize to get a unique, modulating read position behind bpos
-            // tpos = bpos - (0.5+0.49*sin( i[0] += rateadj)) * (i+1) * csize;
             let voice_adv = voice + rate_radians;
             let mut chorus_pos: f32 = chorus.buffer_idx as f32 - (0.5 + 0.49 * voice_adv.sin()) * (voice + 1.0) * spread;
 
@@ -1051,19 +1054,22 @@ pub fn chorus_plugin_process(
 
             let fractional = chorus_pos.fract();
             let mut next_chorus_pos = chorus_pos + 1.0;
+
+            // Make sure the next chorus position isn't past the buffer. It needs to wrap around to the beginning.
             if chorus_pos > sample_length - 1.0 {
                 next_chorus_pos = 0.0;
             }
 
-            let out_l = wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
-            output[0][sample_idx] += out_l;
+            // Out will accumulate the interpolated values from each lfo
+            out += wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
         }
 
-        chorus.buffer[chorus.buffer_idx] = dry_l;
+        chorus.buffer[chorus.buffer_idx] = left_in;
         chorus.buffer_idx += 1;
 
         // Mono output
-        output[1][sample_idx] = output[0][sample_idx];
+        output[0][sample_idx] = out;
+        output[1][sample_idx] = out;
     }
 
     ProcessStatus::Normal
