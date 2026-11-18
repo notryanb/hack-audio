@@ -147,6 +147,7 @@ pub struct Chorus {
     buffer_idx: usize,
     buffer: Vec<f32>,
     lfos: Vec<f32>,
+    last_voice_count: usize,
 }
 
 impl Chorus {
@@ -162,7 +163,8 @@ impl Default for Chorus {
         Self {
             buffer_idx: 0,
             lfos: vec![0.0; 16],
-            buffer: vec![0.0; 192_000]
+            buffer: vec![0.0; 192_000],
+            last_voice_count: 0,
         }
     }
 }
@@ -400,7 +402,9 @@ impl Default for PluginParams {
                     max: 250.0,
                 },
                 
-            ).with_unit(" ms"),
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" ms"),
 
             chorus_voice_count: IntParam::new(
                 "Chorus Voice Count",
@@ -414,9 +418,10 @@ impl Default for PluginParams {
             chorus_rate: FloatParam::new(
                 "Chorus Rate",
                 0.5,
-                FloatRange::Linear {
+                FloatRange::Skewed{
                     min: 0.1,
                     max: 16.0,
+                    factor: FloatRange::skew_factor(-2.0),
                 },
                 
             ).with_unit(" Hz"),
@@ -428,7 +433,7 @@ impl Default for PluginParams {
                     min: 0.0,
                     max: 1.0,
                 },
-            ),
+            ).with_smoother(SmoothingStyle::Linear(50.0)),
 
             chorus_out_mix_wet: FloatParam::new(
                 "Chorus Out Mix Wet",
@@ -1020,32 +1025,41 @@ pub fn chorus_plugin_process(
     params: &Arc<PluginParams>,
     chorus: &mut Chorus,
 ) -> ProcessStatus {
-    let chorus_time_ms = params.chorus_time.value();
-    // TODO - Store voice count on chorus so the lfos only get initialized on change.
-    let voice_count = params.chorus_voice_count.value();
+    let voice_count = params.chorus_voice_count.value() as usize;
+
+    // Voice Count should never be negative, so I think it is safe to cast to usize
+    if chorus.last_voice_count != voice_count {
+        chorus.initialize_lfos(voice_count);
+        chorus.last_voice_count = voice_count;
+    }
+
     let rate_hz = params.chorus_rate.value();
     let rate_radians = rate_hz * 2.0 * std::f32::consts::PI / sample_rate;
-    let depth = params.chorus_depth.value();
     let dry_out = db_to_gain(params.chorus_out_mix_dry.value() as f32);
     let wet_out = db_to_gain(params.chorus_out_mix_wet.value() as f32);
     let wet_mix = wet_out / voice_count as f32;
 
-    let _buffer_capacity = chorus.buffer.len();
+    let buffer_capacity = chorus.buffer.len();
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
 
-    let sample_length = (chorus_time_ms * sample_rate * 0.001) as usize; // (ms * samples/sec * 0.001)
-    let spread = sample_length as f32 / voice_count as f32 * depth;
 
     for sample_idx in 0..num_samples {
+        let depth = params.chorus_depth.smoothed.next();
+        let chorus_time_ms = params.chorus_time.smoothed.next();
+        let sample_length = chorus_time_ms * sample_rate * 0.001; // (ms * samples/sec * 0.001)
+        let spread = sample_length / voice_count as f32 * depth;
+
         // Save original sample to write into the chorus buffer
         let left_in = output[0][sample_idx];
         let mut out = left_in * dry_out;
         // let _dry_r = output[1][sample_idx] * dry_out;
 
         // Take care of circular buffer
-        // let chorus_idx = (chorus.buffer_idx + sample_idx as usize) % sample_length as usize;
-        let chorus_idx = chorus.buffer_idx % sample_length;
+        // let chorus_idx = chorus.buffer_idx % sample_length;
+
+        let write_idx = chorus.buffer_idx;
+        chorus.buffer[write_idx] = left_in;
 
         /*
             Main algorithm
@@ -1053,30 +1067,50 @@ pub fn chorus_plugin_process(
                 - LERP the output value to be the current chorus buffer position with the next one.
                 - Add the LERPed value to the dry mixed value and set that as the output sample
         */
-        for voice_idx in 0..voice_count as usize {
+        for voice_idx in 0..voice_count {
             // TODO - Experiment with different LFO shapes and numerically stable oscillator(phasor)
-            chorus.lfos[voice_idx] += rate_radians; // Always incrementing instead of being between bound 0..2pi... :(
-            let mut chorus_pos: f32 = chorus_idx as f32 - (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
+            chorus.lfos[voice_idx] += rate_radians;
 
-            if chorus_pos < 0.0 {
-                chorus_pos += sample_length as f32;
+            // Wrap the phase if it gets out of 0..2pi bounds
+            if chorus.lfos[voice_idx] >= std::f32::consts::TAU {
+                chorus.lfos[voice_idx] -= std::f32::consts::TAU;
             }
 
-            if chorus_pos >= sample_length as f32 { chorus_pos -= sample_length as f32; }
+            // Start new wrapping
+            let delay = (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
+            let delay_int = delay as usize;
+            let frac = delay - delay_int as f32;
 
-            let mut next_chorus_pos = chorus_pos + 1.0;
+            let idx0 = (write_idx + buffer_capacity - delay_int) % buffer_capacity;
+            let idx1 = (idx0 + buffer_capacity - 1) % buffer_capacity;
 
-            if chorus_pos >= sample_length as f32 - 1.0 {
-                next_chorus_pos = 0.0;
-            }
+            out += wet_mix * (chorus.buffer[idx0] * (1.0 - frac) + chorus.buffer[idx1] * frac);
+            // chorus.buffer_idx = (write_idx + 1) % buffer_capacity;
+            // END new Wrapping
 
-            // Out will accumulate the interpolated values from the chorus delay buffer which are calculated by positions of the lfo voice
-            let fractional = chorus_pos.fract();
-            out += wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
+            // OLD Wrapping
+            // let mut chorus_pos: f32 = chorus_idx as f32 - (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
+
+            // if chorus_pos < 0.0 {
+            //     chorus_pos += sample_length as f32;
+            // }
+
+            // if chorus_pos >= sample_length as f32 { chorus_pos -= sample_length as f32; }
+
+            // let mut next_chorus_pos = chorus_pos + 1.0;
+
+            // if chorus_pos >= sample_length as f32 - 1.0 {
+            //     next_chorus_pos = 0.0;
+            // }
+
+            // // Out will accumulate the interpolated values from the chorus delay buffer which are calculated by positions of the lfo voice
+            // let fractional = chorus_pos.fract();
+            // out += wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
+            // OLD Wrapping END
         }
         
-        chorus.buffer[chorus_idx] = left_in;
-        chorus.buffer_idx = (chorus.buffer_idx + 1) % sample_length;
+        // chorus.buffer_idx = (chorus.buffer_idx + 1) % sample_length;
+        chorus.buffer_idx = (write_idx + 1) % buffer_capacity;
 
         // Mono output
         output[0][sample_idx] = out;
