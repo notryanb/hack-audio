@@ -1056,8 +1056,6 @@ pub fn chorus_plugin_process(
         // let _dry_r = output[1][sample_idx] * dry_out;
 
         // Take care of circular buffer
-        // let chorus_idx = chorus.buffer_idx % sample_length;
-
         let write_idx = chorus.buffer_idx;
         chorus.buffer[write_idx] = left_in;
 
@@ -1076,7 +1074,6 @@ pub fn chorus_plugin_process(
                 chorus.lfos[voice_idx] -= std::f32::consts::TAU;
             }
 
-            // Start new wrapping
             let delay = (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
             let delay_int = delay as usize;
             let frac = delay - delay_int as f32;
@@ -1085,31 +1082,8 @@ pub fn chorus_plugin_process(
             let idx1 = (idx0 + buffer_capacity - 1) % buffer_capacity;
 
             out += wet_mix * (chorus.buffer[idx0] * (1.0 - frac) + chorus.buffer[idx1] * frac);
-            // chorus.buffer_idx = (write_idx + 1) % buffer_capacity;
-            // END new Wrapping
-
-            // OLD Wrapping
-            // let mut chorus_pos: f32 = chorus_idx as f32 - (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
-
-            // if chorus_pos < 0.0 {
-            //     chorus_pos += sample_length as f32;
-            // }
-
-            // if chorus_pos >= sample_length as f32 { chorus_pos -= sample_length as f32; }
-
-            // let mut next_chorus_pos = chorus_pos + 1.0;
-
-            // if chorus_pos >= sample_length as f32 - 1.0 {
-            //     next_chorus_pos = 0.0;
-            // }
-
-            // // Out will accumulate the interpolated values from the chorus delay buffer which are calculated by positions of the lfo voice
-            // let fractional = chorus_pos.fract();
-            // out += wet_mix * (chorus.buffer[chorus_pos as usize] * (1.0 - fractional) + chorus.buffer[next_chorus_pos as usize] * fractional);
-            // OLD Wrapping END
         }
         
-        // chorus.buffer_idx = (chorus.buffer_idx + 1) % sample_length;
         chorus.buffer_idx = (write_idx + 1) % buffer_capacity;
 
         // Mono output
