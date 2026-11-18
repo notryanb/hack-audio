@@ -867,23 +867,23 @@ impl Plugin for HackAudio {
 
                                 ui.painter().line_segment(
                                     [top_left, bottom_right],
-                                    Stroke::new(1.0, axis_color),
+                                    Stroke::new(1.0f32, axis_color),
                                 );
 
                                 ui.painter().line_segment(
                                     [top_right, bottom_left],
-                                    Stroke::new(1.0, axis_color),
+                                    Stroke::new(1.0f32, axis_color),
                                 );
 
                                 ui.painter().line_segment(
                                     [center_top, center_bottom],
-                                    Stroke::new(1.0, axis_color),
+                                    Stroke::new(1.0f32, axis_color),
                                 );
 
                                 ui.painter().circle_stroke(
                                     rect.center(),
-                                    rect.width() / 2.0,
-                                    Stroke::new(1.0, axis_color),
+                                    rect.width() / 2.0f32,
+                                    Stroke::new(1.0f32, axis_color),
                                 );
 
                                 {
@@ -1030,12 +1030,12 @@ pub fn chorus_plugin_process(
     let wet_out = db_to_gain(params.chorus_out_mix_wet.value() as f32);
     let wet_mix = wet_out / voice_count as f32;
 
-    let buffer_capacity = chorus.buffer.len();
+    let _buffer_capacity = chorus.buffer.len();
     let num_samples = buffer.samples();
     let output = buffer.as_slice();
 
-    let sample_length = chorus_time_ms * sample_rate * 0.001; // (ms * samples/sec * 0.001)
-    let spread = sample_length / voice_count as f32 * depth;
+    let sample_length = (chorus_time_ms * sample_rate * 0.001) as usize; // (ms * samples/sec * 0.001)
+    let spread = sample_length as f32 / voice_count as f32 * depth;
 
     for sample_idx in 0..num_samples {
         // Save original sample to write into the chorus buffer
@@ -1045,7 +1045,7 @@ pub fn chorus_plugin_process(
 
         // Take care of circular buffer
         // let chorus_idx = (chorus.buffer_idx + sample_idx as usize) % sample_length as usize;
-        let chorus_idx = chorus.buffer_idx % sample_length as usize;
+        let chorus_idx = chorus.buffer_idx % sample_length;
 
         /*
             Main algorithm
@@ -1059,12 +1059,14 @@ pub fn chorus_plugin_process(
             let mut chorus_pos: f32 = chorus_idx as f32 - (0.5 + 0.49 * chorus.lfos[voice_idx].sin()) * (voice_idx + 1) as f32 * spread;
 
             if chorus_pos < 0.0 {
-                chorus_pos += sample_length;
+                chorus_pos += sample_length as f32;
             }
+
+            if chorus_pos >= sample_length as f32 { chorus_pos -= sample_length as f32; }
 
             let mut next_chorus_pos = chorus_pos + 1.0;
 
-            if chorus_pos >= sample_length - 1.0 {
+            if chorus_pos >= sample_length as f32 - 1.0 {
                 next_chorus_pos = 0.0;
             }
 
@@ -1074,7 +1076,7 @@ pub fn chorus_plugin_process(
         }
         
         chorus.buffer[chorus_idx] = left_in;
-        chorus.buffer_idx = (chorus.buffer_idx + 1) % sample_length as usize;
+        chorus.buffer_idx = (chorus.buffer_idx + 1) % sample_length;
 
         // Mono output
         output[0][sample_idx] = out;
